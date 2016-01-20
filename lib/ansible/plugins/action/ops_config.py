@@ -47,9 +47,4 @@ class ActionModule(NetActionModule, ActionBase):
 
         return result
 
-    def _map_keys(self, task_vars, args):
-        args['port'] = (task_vars.get('ansible_rest_port') or 0)
-        args['username'] = task_vars.get('ansible_rest_user')
-        args['password'] = task_vars.get('ansible_rest_pass')
-        args['protocol'] = task_vars.get('ansible_rest_proto')
 
