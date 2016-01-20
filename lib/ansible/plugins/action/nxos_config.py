@@ -23,9 +23,5 @@ from ansible.plugins.action import ActionBase
 from ansible.plugins.action.net_config import ActionModule as NetActionModule
 
 class ActionModule(NetActionModule, ActionBase):
+    pass
 
-    def _map_keys(self, task_vars, args):
-        args['port'] = (task_vars.get('ansible_nxapi_port') or 0)
-        args['username'] = task_vars.get('ansible_nxapi_user')
-        args['password'] = task_vars.get('ansible_nxapi_pass')
-        args['protocol'] = task_vars.get('ansible_nxapi_proto')
