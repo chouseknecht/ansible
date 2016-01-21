@@ -66,9 +66,9 @@ def parse(lines, indent):
             line_indent = match.start(1)
 
             if not first_child:
-                # let the template dictate spacing.
+                # let the first child occurrence determine indentation width.
+                first_child = True
                 if line_indent > 0:
-                    first_child = True
                     indent = line_indent
 
             if line_indent % indent > 0:
