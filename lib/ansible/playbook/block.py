@@ -44,11 +44,20 @@ class Block(Base, Become, Conditional, Taggable):
     def __init__(self, play=None, parent_block=None, role=None, task_include=None, use_handlers=False, implicit=False):
         self._play         = play
         self._role         = role
-        self._task_include = task_include
-        self._parent_block = parent_block
+        self._task_include = None
+        self._parent_block = None
         self._use_handlers = use_handlers
         self._implicit     = implicit
-        self._dep_chain    = []
+
+        if task_include:
+            self._task_include = task_include
+        elif parent_block:
+            self._parent_block = parent_block
+
+        if parent_block:
+            self._dep_chain = parent_block._dep_chain[:]
+        else:
+            self._dep_chain = []
 
         super(Block, self).__init__()
 
@@ -289,18 +298,18 @@ class Block(Base, Become, Conditional, Taggable):
                     value = self._extend_value(value, parent_value)
                 else:
                     value = parent_value
-            if self._role and (value is None or extend):
-                parent_value = getattr(self._role, attr)
+            if self._role and (value is None or extend) and hasattr(self._role, attr):
+                parent_value = getattr(self._role, attr, None)
                 if extend:
                     value = self._extend_value(value, parent_value)
                 else:
                     value = parent_value
 
-                if len(self._dep_chain) and (not value or extend):
+                if len(self._dep_chain) and (value is None or extend):
                     reverse_dep_chain = self._dep_chain[:]
                     reverse_dep_chain.reverse()
                     for dep in reverse_dep_chain:
-                        dep_value = getattr(dep, attr)
+                        dep_value = getattr(dep, attr, None)
                         if extend:
                             value = self._extend_value(value, dep_value)
                         else:
@@ -308,14 +317,13 @@ class Block(Base, Become, Conditional, Taggable):
 
                         if value is not None and not extend:
                             break
-
-            if self._play and (value is None or extend):
-                parent_value = getattr(self._play, attr)
+            if self._play and (value is None or extend) and hasattr(self._play, attr):
+                parent_value = getattr(self._play, attr, None)
                 if extend:
                     value = self._extend_value(value, parent_value)
                 else:
                     value = parent_value
-        except KeyError:
+        except KeyError as e:
             pass
 
         return value
@@ -335,11 +343,7 @@ class Block(Base, Become, Conditional, Taggable):
         '''
         Override for the 'tags' getattr fetcher, used from Base.
         '''
-        any_errors_fatal = self._attributes['any_errors_fatal']
-        if hasattr(self, '_get_parent_attribute'):
-            if self._get_parent_attribute('any_errors_fatal'):
-                any_errors_fatal = True
-        return any_errors_fatal
+        return self._get_parent_attribute('any_errors_fatal')
 
     def filter_tagged_tasks(self, play_context, all_vars):
         '''
@@ -369,3 +373,4 @@ class Block(Base, Become, Conditional, Taggable):
 
     def has_tasks(self):
         return len(self.block) > 0 or len(self.rescue) > 0 or len(self.always) > 0
+

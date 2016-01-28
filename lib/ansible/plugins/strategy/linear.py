@@ -177,6 +177,9 @@ class StrategyModule(StrategyBase):
                 skip_rest   = False
                 choose_step = True
 
+                # flag set if task is set to any_errors_fatal
+                any_errors_fatal = False
+
                 results = []
                 for (host, task) in host_tasks:
                     if not task:
@@ -188,14 +191,15 @@ class StrategyModule(StrategyBase):
                     run_once = False
                     work_to_do = True
 
+                    if task.any_errors_fatal:
+                        any_errors_fatal = True
+
                     # test to see if the task across all hosts points to an action plugin which
                     # sets BYPASS_HOST_LOOP to true, or if it has run_once enabled. If so, we
                     # will only send this task to the first host in the list.
 
                     try:
                         action = action_loader.get(task.action, class_only=True)
-                        if task.run_once or getattr(action, 'BYPASS_HOST_LOOP', False):
-                            run_once = True
                     except KeyError:
                         # we don't care here, because the action may simply not have a
                         # corresponding action plugin
@@ -227,6 +231,8 @@ class StrategyModule(StrategyBase):
                         templar = Templar(loader=self._loader, variables=task_vars)
                         display.debug("done getting variables")
 
+                        run_once = templar.template(task.run_once)
+
                         if not callback_sent:
                             display.debug("sending task start callback, copying the task so we can template it temporarily")
                             saved_name = task.name
@@ -249,7 +255,7 @@ class StrategyModule(StrategyBase):
                         self._queue_task(host, task, task_vars, play_context)
 
                     # if we're bypassing the host loop, break out now
-                    if run_once:
+                    if run_once or getattr(action, 'BYPASS_HOST_LOOP', False):
                         break
 
                     results += self._process_pending_results(iterator, one_pass=True)
@@ -342,13 +348,20 @@ class StrategyModule(StrategyBase):
                 display.debug("results queue empty")
 
                 display.debug("checking for any_errors_fatal")
-                had_failure = include_failure
+                failed_hosts = []
                 for res in results:
                     if res.is_failed() or res.is_unreachable():
-                        had_failure = True
-                        break
-                if task and task.any_errors_fatal and had_failure:
-                    return False
+                        failed_hosts.append(res._host.name)
+
+                # if any_errors_fatal and we had an error, mark all hosts as failed
+                if any_errors_fatal and len(failed_hosts) > 0:
+                    for host in hosts_left:
+                        # don't double-mark hosts, or the iterator will potentially
+                        # fail them out of the rescue/always states
+                        if host.name not in failed_hosts:
+                            self._tqm._failed_hosts[host.name] = True
+                            iterator.mark_host_failed(host)
+                display.debug("done checking for any_errors_fatal")
 
             except (IOError, EOFError) as e:
                 display.debug("got IOError/EOFError in task loop: %s" % e)
