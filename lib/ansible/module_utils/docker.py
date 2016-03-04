@@ -20,14 +20,20 @@
 import ConfigParser
 import os
 import logging
+import re
 
 from os.path import expanduser
+from requests.exceptions import SSLError
+from urlparse import urlparse
 
 try:
     from docker import Client
     from docker.errors import APIError, TLSParameterError
     from docker.tls import TLSConfig
     from docker.constants import DEFAULT_TIMEOUT_SECONDS, DEFAULT_DOCKER_API_VERSION
+
+    ## TODO - Which version(s) of docker-py will be supported
+
 except ImportError:
     raise Exception("Failed to import docker-py. Try `pip install docker-py`")
 
@@ -41,14 +47,15 @@ DOCKER_PROFILE_PATH = ".ansible_docker/profiles"
 DOCKER_COMMON_ARGS = dict(
     docker_host=dict(type="str"),
     docker_profile=dict(type="str"),
+    tls_hostname=dict(type="str"),
     api_version=dict(type="str"),
     timeout=dict(type='int'),
     cacert_path=dict(type='str'),
     cert_path=dict(type='str'),
     key_path=dict(type='str'),
     ssl_version=dict(type='str'),
-    tls=dict(type='str'),
-    tls_verify=dict(type='str'),
+    tls=dict(type='bool'),
+    tls_verify=dict(type='bool'),
     debug=dict(type='bool', default=False)
 )
 
@@ -70,7 +77,7 @@ class AnsibleDockerClient(Client):
         merged_arg_spec.update(DOCKER_COMMON_ARGS)
         if argument_spec:
             merged_arg_spec.update(argument_spec)
-            self._arg_spec = merged_arg_spec
+            self.arg_spec = merged_arg_spec
 
         mutually_exclusive_params = []
         mutually_exclusive_params += DOCKER_MUTUALLY_EXCLUSIVE
@@ -82,35 +89,42 @@ class AnsibleDockerClient(Client):
         if required_together:
             required_together_params += required_together
 
-        self._module = AnsibleModule(
+        self.module = AnsibleModule(
             argument_spec=merged_arg_spec,
             supports_check_mode=supports_check_mode,
             mutually_exclusive=mutually_exclusive_params,
             required_together=required_together_params)
 
-        if self._module.params.get('debug'):
-            logging.basicConfig(level=logging.DEBUG)
-
+        self.check_mode = self.module.check_mode   
         self._connect_params = self._get_connect_params()
+
         self.log("connect params:")
         for key in self._connect_params:
             self.log("  {0}: {1}".format(key, self._connect_params[key]))
+
         try:
             super(AnsibleDockerClient, self).__init__(**self._connect_params)
         except APIError, exc:
-            self._module.faile_json(msg="Docker API error: {0}".format(exc))
+           self.fail("Docker API error: {0}".format(exc))
+        except Exception, exc:
+           self.fail("Error connecting: {0}".format(exc))
 
     @property
-    def arg_spec(self):
-        return self._arg_spec
+    def module_params(self):
+        request = dict()
+        for key in self.arg_spec:
+            request[key] = self.module.params.get(key)
+        return request
 
-    @property
-    def module(self):
-        return self._module
-
-    def log(self, msg):
-        self.logger.debug(msg + u'\n')
-
+    def log(self, msg, pretty_print=False):
+        if pretty_print:
+            self.logger.debug(json.dumps(msg, sort_keys=True, indent=4, separators=(',', ': ')))
+        else:
+            self.logger.debug(msg)
+    
+    def fail(self, msg):
+        self.module.fail_json(msg=msg)
+        
     def _get_auth_file(self):
         path = expanduser("~")
         path += '/' + DOCKER_PROFILE
@@ -118,8 +132,9 @@ class AnsibleDockerClient(Client):
         try:
             p.read(path)
             return p
-        except:
-            self._module.fail_json(msg="Failed to access {0}. Does the file exist? Do you have read permissions?".format(path))
+        except Exception, exc:
+            self.module.fail_json(
+                msg="Failed to access {0}. Does the file exist? Do you have read permissions? {1}".format(path, exc))
 
     def _parse_profile(self, profile, default_params):
         parser = self._get_auth_file()
@@ -132,7 +147,7 @@ class AnsibleDockerClient(Client):
                     default_params[key] = False
                 default_params[key] = file_value
             except Exception, exc:
-                self._module.fail_json(
+                self.module.fail_json(
                     msg="Error getting {0} for profile {1} in ~/{2} - {3}".format(key,
                                                                                   profile,
                                                                                   DOCKER_PROFILE_PATH,
@@ -167,33 +182,24 @@ class AnsibleDockerClient(Client):
         # take the default
         return default_value
 
-    def _get_auth(self):
+    @property
+    def auth_params(self):
         # Get authentication credentials.
         # Precedence: module parameters-> environment variables-> defaults.
 
         self.log('Getting credentials')
 
-        params = self._module.params
-        auth_params = dict(
-            docker_profile=params.get('docker_profile'),
-            docker_host=params.get('docker_host'),
-            api_version=params.get('api_version'),
-            cacert_path=params.get('cacert_path'),
-            cert_path=params.get('cert_path'),
-            key_path=params.get('key_path'),
-            ssl_version=params.get('ssl_version'),
-            tls=params.get('tls'),
-            tls_verify=params.get('tls_verify'),
-            timeout=params.get('timeout'),
-        )
+        params = dict()
+        for key in DOCKER_COMMON_ARGS:
+            params[key] = self.module.params.get(key)
 
-        if auth_params['docker_profile']:
+        if params['docker_profile']:
 
             ## TODO -- Do we want to support profiles?
 
-            self.log('Retrieving profile {0}'.format(auth_params['docker_profile']))
-            self._parse_profile(auth_params['docker_profile'], auth_params)
-            return auth_params
+            self.log('Retrieving profile {0}'.format(params['docker_profile']))
+            self._parse_profile(params['docker_profile'], params)
+            return params
 
         docker_profile_env = os.environ.get('ANSIBLE_DOCKER_PROFILE')
         if docker_profile_env:
@@ -201,24 +207,36 @@ class AnsibleDockerClient(Client):
             ## TODO -- Do we want to support profiles?
 
             self.log('Retrieving profile {0}'.format(docker_profile_env))
-            self._parse_profile(docker_profile_env, auth_params)
-            return auth_params
+            self._parse_profile(docker_profile_env, params)
+            return params
 
-        return dict(
-            docker_host=self._get_value('docker_host', auth_params['docker_host'], 'DOCKER_HOST',
+        result = dict(
+            docker_host=self._get_value('docker_host', params['docker_host'], 'DOCKER_HOST',
                                         DEFAULT_DOCKER_HOST),
-            api_version=self._get_value('api_version', auth_params['api_version'], 'DOCKER_API_VERSION',
+            tls_hostname=self._get_value('tls_hostname', params['tls_hostname'],
+                                        'DOCKER_TLS_HOSTNAME', None),
+            api_version=self._get_value('api_version', params['api_version'], 'DOCKER_API_VERSION',
                                         DEFAULT_DOCKER_API_VERSION),
-            cacert_path=self._get_value('cacert_path', auth_params['cacert_path'], 'DOCKER_CERT_PATH', None),
-            cert_path=self._get_value('cert_path', auth_params['cert_path'], 'DOCKER_CERT_PATH', None),
-            key_path=self._get_value('key_path', auth_params['key_path'], 'DOCKER_CERT_PATH', None),
-            ssl_version=self._get_value('ssl_version', auth_params['ssl_version'], 'DOCKER_SSL_VERSION', None),
-            tls=self._get_value('tls', auth_params['tls'], 'DOCKER_TLS', DEFAULT_TLS),
-            tls_verify=self._get_value('tls_verfy', auth_params['tls_verify'], 'DOCKER_TLS_VERIFY',
+            cacert_path=self._get_value('cacert_path', params['cacert_path'], 'DOCKER_CERT_PATH', None),
+            cert_path=self._get_value('cert_path', params['cert_path'], 'DOCKER_CERT_PATH', None),
+            key_path=self._get_value('key_path', params['key_path'], 'DOCKER_CERT_PATH', None),
+            ssl_version=self._get_value('ssl_version', params['ssl_version'], 'DOCKER_SSL_VERSION', None),
+            tls=self._get_value('tls', params['tls'], 'DOCKER_TLS', DEFAULT_TLS),
+            tls_verify=self._get_value('tls_verfy', params['tls_verify'], 'DOCKER_TLS_VERIFY',
                                        DEFAULT_TLS_VERIFY),
-            timeout=self._get_value('timeout', auth_params['timeout'], 'DOCKER_TIMEOUT',
+            timeout=self._get_value('timeout', params['timeout'], 'DOCKER_TIMEOUT',
                                     DEFAULT_TIMEOUT_SECONDS),
         )
+
+        if result['tls_hostname'] is None:
+            # get default machine name from the url
+            parsed_url = urlparse(result['docker_host'])
+            if ':' in parsed_url.netloc:
+                result['tls_hostname'] = parsed_url.netloc[:parsed_url.netloc.rindex(':')]
+            else:
+                result['tls_hostname'] = parsed_url
+
+        return result
 
     def _get_tls_config(self, **kwargs):
         self.log("get_tls_config:")
@@ -228,10 +246,11 @@ class AnsibleDockerClient(Client):
             tls_config = TLSConfig(**kwargs)
             return tls_config
         except TLSParameterError, exc:
-            self._module.fail_json(msg="TLS config error: {0}".format(exc))
+           self.fail("TLS config error: {0}".format(exc))
 
     def _get_connect_params(self):
-        auth = self._get_auth()
+        auth = self.auth_params
+
         self.log("connection params:")
         for key in auth:
             self.log("  {0}: {1}".format(key, auth[key]))
@@ -263,10 +282,13 @@ class AnsibleDockerClient(Client):
             if auth['cacert_path']:
                 tls_config = self._get_tls_config(client_cert=(auth['cert_path'], auth['key_path']),
                                                   ca_cert=auth['cacert_path'],
+                                                  verify=True,
+                                                  assert_hostname=auth['tls_hostname'],
                                                   ssl_version=auth['ssl_version'])
             else:
                 tls_config = self._get_tls_config(client_cert=(auth['cert_path'], auth['key_path']),
                                                   verify=True,
+                                                  assert_hostname=auth['tls_hostname'],
                                                   ssl_version=auth['ssl_version'])
 
             return dict(base_url=auth['docker_host'],
@@ -277,6 +299,8 @@ class AnsibleDockerClient(Client):
         if auth['tls_verify'] and auth['cacert_path']:
             # TLS with cacert only
             tls_config = self._get_tls_config(ca_cert=auth['cacert_path'],
+                                              assert_hostname=auth['tls_hostname'],
+                                              verify=True,
                                               ssl_version=auth['ssl_version'])
             return dict(base_url=auth['docker_host'],
                         tls=tls_config,
@@ -286,6 +310,7 @@ class AnsibleDockerClient(Client):
         if auth['tls_verify']:
             # TLS with verify and no certs
             tls_config = self._get_tls_config(verify=True,
+                                              assert_hostname=auth['tls_hostname'],
                                               ssl_version=auth['ssl_version'])
             return dict(base_url=auth['docker_host'],
                         tls=tls_config,
@@ -295,3 +320,54 @@ class AnsibleDockerClient(Client):
         return dict(base_url=auth['docker_host'],
                     version=auth['api_version'],
                     timeout=auth['timeout'])
+
+    def _handle_ssl_error(self, error):
+        match = re.match(r"hostname.*doesn\'t match (\'.*\')", str(error))
+        if match:
+            msg = "You asked for verification that Docker host name matches {0}. The actual hostname is {1}. " \
+                "Most likely you need to set DOCKER_TLS_HOSTNAME or pass tls_hostname with a value of {1}. " \
+                "You may also use TLS without verification by setting the tls parameter to true."\
+                .format(self.auth_params['tls_hostname'], match.group(1))
+            self.fail(msg)
+        self.fail("SSL Exception: {0}".format(error))
+
+    def _raise_for_status(self, response, explanation=None):
+        """Raises stored :class:`APIError`, if one occurred."""
+        try:
+            response.raise_for_status()
+        except Exception, exc:
+            self.fail(str(exc))
+
+    def get_container(self, name=None):
+        if name is None:
+            return None
+
+        search_name = name
+        if not name.startswith('/'):
+            search_name = '/' + name
+
+        result = None
+        try:
+            for container in self.containers(all=True):
+                if search_name in container['Names']:
+                    result = container
+                    break
+                if container['Id'].startswith(name):
+                    result = container
+                    break
+                if container['Id'] == name:
+                    result = container
+                    break
+        except SSLError, exc:
+            self._handle_ssl_error(exc)
+        except Exception, exc:
+           self.fail("Error retrieving container list: {0}".format(exc))
+
+        if result is not None:
+            try:
+                result = self.inspect_container(container=result['Id'])
+            except Exception, exc:
+               self.fail("Error inspecting container: {0}".format(exc))
+
+        return result
+
