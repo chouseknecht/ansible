@@ -326,7 +326,7 @@ class AnsibleDockerClient(Client):
         if match:
             msg = "You asked for verification that Docker host name matches {0}. The actual hostname is {1}. " \
                 "Most likely you need to set DOCKER_TLS_HOSTNAME or pass tls_hostname with a value of {1}. " \
-                "You may also use TLS without verification by setting the tls parameter to true."\
+                "You may also use TLS without verification by setting the tls parameter to true." \
                 .format(self.auth_params['tls_hostname'], match.group(1))
             self.fail(msg)
         self.fail("SSL Exception: {0}".format(error))
@@ -361,13 +361,12 @@ class AnsibleDockerClient(Client):
         except SSLError, exc:
             self._handle_ssl_error(exc)
         except Exception, exc:
-           self.fail("Error retrieving container list: {0}".format(exc))
+            self.fail("Error retrieving container list: {0}".format(exc))
 
         if result is not None:
             try:
                 result = self.inspect_container(container=result['Id'])
             except Exception, exc:
-               self.fail("Error inspecting container: {0}".format(exc))
+                self.fail("Error inspecting container: {0}".format(exc))
 
         return result
-
